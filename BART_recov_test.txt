@@ -1,0 +1,23 @@
+model{
+  # Priors for the free parameters (one participant only - no group comparison)
+  
+  gamma ~ dnorm(1, 1/2^2)T(0,)
+  beta ~ dnorm(0.2, 2/3^2)T(0,)
+  p <- 0.1
+  
+  for (t in 1:ntrials){
+  
+  
+   
+    for (k in 1:n_flips[t]){
+    
+      omega[t,k] <- -gamma/(log(1-p))
+      
+      theta[t,k] <- (1/(1.0000001+max(-15,min(15,exp(beta*(k-omega[t,k]))))))
+    
+    # decision to flip (d=0) or bank (d=1) as bernoulli sample  
+      d[t,k] ~ dbern(theta[t,k])
+    }
+  
+  }
+} 
