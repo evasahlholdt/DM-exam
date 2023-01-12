@@ -1,0 +1,33 @@
+# BART Group Difference Model with Priors for Crack Users vs Healthy Adults
+data{
+ for (k in 1:maxPumps){
+   cut[k] = k - 0.5
+ }
+}
+model{
+  for (i in 1:nParticipants){
+    rho[i] ~ dnorm(muRho[z[i]], 1/sigmaRho[z[i]]^2)T(0, )
+    beta[i] ~ dnorm(muBeta[z[i]], 1/sigmaBeta[z[i]]^2)T(0, )
+  }
+  muGrandRho ~ dnorm(7, 1/5^2)T(0,)
+  deltaRho ~ dnorm(0, 1/10^2)
+  deltaPriorRho ~ dnorm(0, 1/10^2)
+  muRho[1] = muGrandRho - deltaRho/2
+  muRho[2] = muGrandRho + deltaRho/2
+  sigmaRho[1] ~ dnorm(0, 1/10^2)T(0, )
+  sigmaRho[2] ~ dnorm(0, 1/10^2)T(0, )
+  
+  
+  muGrandBeta ~ dnorm(3, 1/2^2)T(0,)
+  deltaBeta ~ dnorm(0, 1/10^2)
+  deltaPriorBeta ~ dnorm(0, 1/10^2)
+  muBeta[1] = muGrandBeta - deltaBeta/2
+  muBeta[2] = muGrandBeta + deltaBeta/2
+  sigmaBeta[1] ~ dnorm(0, 1/10^2)T(0, )
+  sigmaBeta[2] ~ dnorm(0, 1/10^2)T(0, )
+  
+  for (t in 1:totalTrials){
+    yPrime[t] ~ dnorm(rho[participant[t]], 1/beta[participant[t]]^2)T(0, )
+    y[t] ~ dinterval(round(yPrime[t]), cut[1:burst[t]])
+  }
+}

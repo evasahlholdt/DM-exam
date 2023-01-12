@@ -1,0 +1,176 @@
+model {
+
+  mu_gamma_log ~ dnorm(0,1) # overall mean of gamma (risk propensity)
+  delta_gamma ~ dnorm(0,1) # overall difference in gamma (risk propensity) # prior to delta for gamma
+
+  mu_beta_log ~ dnorm(0,1) # overall group mean of beta (consistency)
+  delta_beta ~ dnorm(0,1) # overall  difference in beta (consistency) / group difference. Prior for delta on beta
+
+  ##------------------------------------------------------------------------------
+  #-------------- Group A Priors ------------------------------------------------
+  #------------------------------------------------------------------------------
+  # Mode (mu) priors for gamma and beta parameters
+  # Model includes re-parameterisation of gamma distribution (shape and rate) to get mode and sd
+  # Log transform included for implementation of hierarchical t.test
+  
+  #gamma
+  log(A.mu_gamma) <- mu_gamma_log - (delta_gamma/2) # this is the t-test(?)
+  A.rate_gamma <- (A.mu_gamma + sqrt(A.mu_gamma^2 + 4*A.sigma_gamma^2)) / (2 * A.sigma_gamma^2)   #reparameterisation
+  A.shape_gamma <- 1 + A.mu_gamma * A.rate_gamma # reparameterisation
+
+
+
+  #Beta 
+  log(A.mu_beta) <- mu_beta_log - (delta_beta/2) #cant be in gamma sspace, to linear 
+  A.rate_beta <- (A.mu_beta + sqrt(A.mu_beta^2 + 4*A.sigma_beta^2)) / (2 * A.sigma_beta^2)  # reparameterisation
+  A.shape_beta <- 1 + A.mu_beta * A.rate_beta # reparameterisation
+
+  #------------------------------------------------------------------------------
+  #-------------- Group B Priors ------------------------------------------------
+  #------------------------------------------------------------------------------
+  # Mode (mu) priors for gamma and beta parameters
+  # Model includes re-parameterisation of gamma distribution to get mode and sd
+  # Log transform included for implementation of hierarchical t.test
+  log(B.mu_gamma) <- mu_gamma_log + (delta_gamma/2)
+  B.rate_gamma <- (B.mu_gamma + sqrt(B.mu_gamma^2 + 4*B.sigma_gamma^2)) / (2 * B.sigma_gamma^2)  # reparameterisation to mu
+  B.shape_gamma <- 1 + B.mu_gamma * B.rate_gamma # reparameterisation
+
+  log(B.mu_beta) <- mu_beta_log + (delta_beta/2)
+  B.rate_beta <- (B.mu_beta + sqrt(B.mu_beta^2 + 4*B.sigma_beta^2)) / (2 * B.sigma_beta^2)  # reparameterisation
+  B.shape_beta <- 1 + B.mu_beta * B.rate_beta # reparameterisation
+
+  #------------------------------------------------------------------------------
+  #--------- Variance Priors ----------------------------------------------------
+  #------------------------------------------------------------------------------
+  # variance priors for gamma and beta parameters
+  # Convert standard deviation in gamma distributions to precision
+  # Allows use of Jeffries prior dgamma(0.01,0.01)
+ 
+ ### Group A
+  A.prec_gamma ~ dgamma(.01,.01) #precision gamma, defined here. Only sigma is used in further model specification. 
+  A.var_gamma <- 1/A.prec_gamma #variance gamma
+  A.sigma_gamma <- sqrt(A.var_gamma)  #sd gamma
+
+  A.prec_beta ~ dgamma(.01,.01) #precision beta
+  A.var_beta <- 1/A.prec_beta #variance beta
+  A.sigma_beta <- sqrt(A.var_beta) #sd beta
+
+
+#### Group B
+  B.prec_gamma ~ dgamma(.01,.01) #precision, gamma #prior for precision
+  B.var_gamma <- 1/B.prec_gamma  #variance, gamma 
+  B.sigma_gamma <- sqrt(B.var_gamma)  #sd, gamma
+
+  B.prec_beta ~ dgamma(.01,.01) #precision, beta
+  B.var_beta <- 1/B.prec_beta #variance, beta. don't really ned to calculate var, but it helps understanding the relation between sigma and precision
+  B.sigma_beta <- sqrt(B.var_beta)  #standard deviation, beta
+  
+  #variance and sd are simply calculated here to show the relationshios between them and precision
+
+#-----------------------------------------------------------------------------
+#------------ subject level model --------------------------------------------
+#-----------------------------------------------------------------------------
+
+#------------------------- A Group -------------------------------------------
+
+  for (s in 1:A.nsubs) {
+  
+    # subject level parameters. Assume gamma distribution for positively constrained params
+    #Gamma distribution is the conjugate prior for the precision
+    
+    A.gamma[s] ~ dgamma(A.shape_gamma,A.rate_gamma) #risk propensity
+
+    A.beta[s] ~ dgamma(A.shape_beta,A.rate_beta) #behavioral consistency
+    
+    # Specifying omega the same place Lee&Wagenmakers and van ravenzwaij et al. (2011) did
+    # However, this would be to not update the model at all to our experimental setup - We assume that people do not use the information available to them - which is a bad assumption. I think it would be better to keep it on the trial level 
+    #A.omega[s] <- -A.gamma[s]/(log(1-A.p[s])) #if it is to be specified here, p should be static, so either 1/32 or 3/32
+    
+    #---------------------------------------------------------------------------
+    # trial level model
+    for (t in 1:ntrials) {
+      
+      # option to assume prtoimal number of card flips is decided at the beginning of a trial, and not updated throughout the game - this is what Liv did on her bachelor
+      # optimal flips set at trial level and not updated based on flip outcome
+      A.omega[t,s] <- -A.gamma[s]/(log(1-A.p[t,s]))
+      
+      #-------------------------------------------------------------------------
+      # choice level model
+      for (k in 1:A.nchoices[t,s]) {
+      
+        # optimal number of flips - decreases as a function of probability
+        # assumes probability judgement is objective, and updates with flips
+        # dynamic threshold
+        #A.omega[k,t,s] <- -A.gamma[s]/(log(1-A.p[k,t,s]))
+        
+        # probability of banking, given optimal number of flips
+        #---Decimal added to avoid "node inconsistent with parent" error--------
+        #exponential model converges on an integer, decimal added to prevent this
+        #solution described here
+        #https://stackoverflow.com/questions/37956257/node-inconsistent-with-p
+        
+          A.theta[k,t,s] <- 1-(1/(1.0000001+max(-15,min(15,exp(A.beta[s]*(k[t,s]-A.omega[t,s]))))))
+        
+        # NOTE THAT THE X-AXIS HERE IS NEGATIVE - this is why there is a 1 - ....
+        # DISTANCE BETWEEN CURRENT TRIAL (E.G. 2) AND OPTIMAL (E.G 8)
+        # SO STARTS AT NEGATIVE OPTIMAL, AND INCREASES TO 0
+        # THIS IS WHY beta SHOULD BE POSITIVE !!!!!!!!!
+
+        # decision to flip (d=0) or bank (d=1) as bernoulli sample  
+        A.d[k,t,s] ~ dbern(A.theta[k,t,s])
+  
+      }
+    }
+  }
+
+#-------------------------- B Group -------------------------------------------------------------
+
+  for (s in 1:B.nsubs) {
+  
+    # subject level parameters. Assume gamma distribution for positively constrained params
+    B.gamma[s] ~ dgamma(B.shape_gamma,B.rate_gamma) #risk propensity
+
+    B.beta[s] ~ dgamma(B.shape_beta,B.rate_beta) #behavioral consistency
+    
+    # Specifying omega the same place Lee&Wagenmakers and van ravenzwaij et al. (2011) did
+    #B.omega[s] <- -B.gamma[s]/(log(1-B.p[s])) #if it is to be specified here, p should be static, so either 1/32 or 3/32
+    
+    #---------------------------------------------------------------------------
+    # trial level model
+    for (t in 1:ntrials) {
+      
+      # option to assume probability doesn't vary - consider applying to delayed condition
+      # optimal flips set at trial level and not updated based on flip outcome
+      B.omega[t,s] <- -B.gamma[s]/(log(1-B.p[t,s]))
+      
+      #-------------------------------------------------------------------------
+      # choice level model
+      for (k in 1:B.nchoices[t,s]) {
+      
+        # optimal number of flips - decreases as a function of probability
+        # assumes probability judgement is objective, and updates with flips
+        #B.omega[k,t,s] <- -B.gamma[s]/(log(1-B.p[k,t,s]))
+        
+        # probability of banking, given optimal number of flips
+        #---Decimal added to avoid "node inconsistent with parent" error--------
+        #exponential model converges on an integer, decimal added to prevent this
+        #solution described here
+        #https://stackoverflow.com/questions/37956257/node-inconsistent-with-p
+        
+          B.theta[k,t,s] <- 1-(1/(1.0000001+max(-15,min(15,exp(B.beta[s]*(k[t,s]-B.omega[t,s]))))))
+        
+        # NOTE THAT THE X-AXIS HERE IS NEGATIVE - this is why there is a 1 - ....
+        # DISTANCE BETWEEN CURRENT TRIAL (E.G. 2) AND OPTIMAL (E.G 8)
+        # SO STARTS AT NEGATIVE OPTIMAL, AND INCREASES TO 0
+        # THIS IS WHY beta SHOULD BE POSITIVE !!!!!!!!!
+
+        
+        # decision to flip (d=0) or bank (d=1) as bernoulli sample  
+        B.d[k,t,s] ~ dbern(B.theta[k,t,s])
+  
+      }
+    }
+  }
+
+
+}
