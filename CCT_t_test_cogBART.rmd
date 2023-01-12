@@ -1,0 +1,574 @@
+---
+title: "CCT_t_test"
+author: "Liv Tollånes"
+date: "2022-12-27"
+output: html_document
+---
+
+```{r}
+#Loading packages
+install.packages("pacman")
+pacman::p_load('hesim', 'extraDistr', 'R2jags', 'parallel', 'ggpubr', 'dplyr', 'simcausal')
+
+#Laoding dfa frame
+df <- read.csv("DMexamdata.csv")
+```
+
+```{r}
+# -----------------------------------------
+ncards <- 32
+ntrials <- max(df$CCT_Round_Tria_Num)
+
+# set probability vectors according to the two possible bad-card-conditions
+# copy into subject matrices according to df$CCT_Round_LossNum variable
+
+# probability of a win card at each trial
+p_win1 <- (seq(32,1,-1)-1)/ #number of winners left
+  seq(32,1,-1) # number of cards left
+
+p_win3 <- (seq(32,1,-1)-3)/ #number of winners left
+  seq(32,1,-1) # number of cards left
+
+p_win3[31:32] <- 0 # The last card cannot be picked, and so the probability should be 0
+
+```
+
+```{r}
+
+#------------------------------------------------------------------------
+# ---------- make decision matrices for CONTROL group --------------------------
+#------------------------------------------------------------------------
+
+# - find control subjects
+cont.subID <- unique(df$ID[df$Study_Group=="Health Adults"]) 
+cont.nsubs <- length(cont.subID) # 20 Healthy adults
+
+
+# - make empty arrays to populate
+cont.p <- array(0,c(ncards,ntrials,cont.nsubs))
+cont.d <- array(0,c(ncards,ntrials,cont.nsubs))
+cont.nchoices <- array(0,c(ntrials,cont.nsubs))
+
+# - fill data arrays -------------------------
+for (s in 1:cont.nsubs) {
+  
+  # make data matrices for one subject
+  sub_df <- df[df$ID==cont.subID[s] & df$CCT_Task_Type == "Hot1",] # For all controls
+  
+  #- fill probability arrays for all controls, dependent on number of loss cards on a current trial
+  for (t in 1:ntrials) {
+    
+    if (sub_df$CCT_Round_LossNum[t] == 1)
+    {cont.p[,t,s] <- p_win1}
+    else 
+    {cont.p[,t,s] <- p_win3}
+    
+  } 
+  #-----------------------------------------------------------
+  
+  # make decision array - will be a ragged array
+  d.temp <- t(as.matrix(sub_df[,18:(18+31)]))
+  colnames(d.temp) <- NULL
+  rownames(d.temp) <- NULL
+  
+  # code all non-choices as NA - change from 0
+  d.temp[d.temp==0] <- NA
+  
+  # code all "opt-in" card flips as 0 - for model specification
+  d.temp <- d.temp - 1
+  
+  # identify bust trials - which trials did the subject actively choose a loss card - no opt-out 
+  #bust <- sub_df$CCT_Score==(sub_df$CCT_NumCardChosen-1)*sub_df$CCT_Round_WinValue-sub_df$CCT_Round_LossValue
+  bust <- sub_df$CCT_NumCardChosen == (sub_df$CCT_Censored)
+  
+  # find and replace "opt-out" choices - cases where subject decided to choose no more cards
+  # code as 1 - for model specification
+  for (t in 1:ntrials) {
+    
+    if (bust[t] == FALSE) {
+      d.temp[sub_df$CCT_NumCardChosen[t],t] = 1
+    }
+    
+  }
+  
+  cont.d[,,s] <- d.temp
+  cont.nchoices[,s] <- sub_df$CCT_NumCardChosen
+  
+}
+
+```
+
+```{r}
+#------------------------------------------------------------------------
+# ---------- make data matrices for TEEN group --------------------------
+#------------------------------------------------------------------------
+
+
+# - find control subjects
+teen.subID <- unique(df$ID[df$Study_Group=="Health Adolescents"]) 
+teen.nsubs <- length(teen.subID) # 18 teens
+
+
+# - make empty arrays to populate
+teen.p <- array(0,c(ncards,ntrials,teen.nsubs))
+teen.d <- array(0,c(ncards,ntrials,teen.nsubs))
+teen.nchoices <- array(0,c(ntrials,teen.nsubs))
+
+
+# - fill data arrays -------------------------
+for (s in 1:teen.nsubs) {
+  
+  # make data matrices for one subject
+  sub_df <- df[df$ID==teen.subID[s] & df$CCT_Task_Type == "Hot1",] # For all teen users
+  
+  #- fill probability arrays for all teen users, dependent on number of loss cards on a current trial
+  for (t in 1:ntrials) {
+    
+    if (sub_df$CCT_Round_LossNum[t] == 1)
+    {teen.p[,t,s] <- p_win1}
+    else 
+    {teen.p[,t,s] <- p_win3}
+    
+  } 
+  #-----------------------------------------------------------
+  
+  # make decision array - will be a ragged array
+  d.temp <- t(as.matrix(sub_df[,18:(18+31)]))
+  colnames(d.temp) <- NULL
+  rownames(d.temp) <- NULL
+  
+  # code all non-choices as NA - change from 0
+  d.temp[d.temp==0] <- NA
+  
+  # code all "opt-in" card flips as 0 - for model specification
+  d.temp <- d.temp - 1
+  
+  # identify bust trials - which trials did the subject actively choose a loss card - no opt-out 
+  #bust <- sub_df$CCT_Score==(sub_df$CCT_NumCardChosen-1)*sub_df$CCT_Round_WinValue-sub_df$CCT_Round_LossValue
+  bust <- sub_df$CCT_NumCardChosen == (sub_df$CCT_Censored)
+  
+  # find and replace "opt-out" choices - cases where subject decided to choose no more cards
+  # code as 1 - for model specification
+  for (t in 1:ntrials) {
+    
+    if (bust[t] == FALSE) {
+      d.temp[sub_df$CCT_NumCardChosen[t],t] = 1
+    }
+    
+  }
+  
+  teen.d[,,s] <- d.temp
+  teen.nchoices[,s] <- sub_df$CCT_NumCardChosen
+  
+}
+
+```
+
+```{r}
+#------------------------------------------------------------------------
+# ---------- make data matrices for CRACK group --------------------------
+#------------------------------------------------------------------------
+
+# - find control subjects
+crack.subID <- unique(df$ID[df$Study_Group=="Crack Users"]) 
+crack.nsubs <- length(crack.subID) # 27 crack users
+
+
+# - make empty arrays to populate
+crack.p <- array(0,c(ncards,ntrials,crack.nsubs))
+crack.d <- array(0,c(ncards,ntrials,crack.nsubs))
+crack.nchoices <- array(0,c(ntrials,crack.nsubs))
+
+# - fill data arrays -------------------------
+for (s in 1:crack.nsubs) {
+  
+  # make data matrices for one subject
+  sub_df <- df[df$ID==crack.subID[s] & df$CCT_Task_Type == "Hot1",] # For all crack users
+  
+  #- fill probability arrays for all crack users, dependent on number of loss cards on a current trial
+  for (t in 1:ntrials) {
+    
+    if (sub_df$CCT_Round_LossNum[t] == 1)
+    {crack.p[,t,s] <- p_win1}
+    else 
+    {crack.p[,t,s] <- p_win3}
+    
+  } 
+  #-----------------------------------------------------------
+  
+  # make decision array - will be a ragged array
+  d.temp <- t(as.matrix(sub_df[,18:(18+31)]))
+  colnames(d.temp) <- NULL
+  rownames(d.temp) <- NULL
+  
+  # code all non-choices as NA - change from 0
+  d.temp[d.temp==0] <- NA
+  
+  # code all "opt-in" card flips as 0 - for model specification
+  d.temp <- d.temp - 1
+  
+  # identify bust trials - which trials did the subject actively choose a loss card - no opt-out 
+  #bust <- sub_df$CCT_Score==(sub_df$CCT_NumCardChosen-1)*sub_df$CCT_Round_WinValue-sub_df$CCT_Round_LossValue
+  bust <- sub_df$CCT_NumCardChosen == (sub_df$CCT_Censored)
+  
+  # find and replace "opt-out" choices - cases where subject decided to choose no more cards
+  # code as 1 - for model specification
+  for (t in 1:ntrials) {
+    
+    if (bust[t] == FALSE) {
+      d.temp[sub_df$CCT_NumCardChosen[t],t] = 1
+    }
+    
+  }
+  
+  crack.d[,,s] <- d.temp
+  crack.nchoices[,s] <- sub_df$CCT_NumCardChosen
+  
+}
+```
+
+```{r}
+# ####-----------T.tests-----------------####
+# #------  Controls vs. teens --------
+# #A.p <- 1-cont.p[1,,] # first probability extracted, for all trials, for all participants - when omega defined at the trial level
+# A.p <- 0.1
+# A.d <- cont.d
+# A.nchoices <- cont.nchoices
+# A.nsubs <- cont.nsubs
+# 
+# #B.p <- 1-teen.p[1,,] # first probability extracted, for all trials, for all participants - when omega defined at the trial level
+# B.p <- 0.1
+# B.d <- teen.d
+# B.nchoices <- teen.nchoices
+# B.nsubs <- teen.nsubs
+# 
+# #B.nchoices[10,16] <- 31 # edge correction - can't make 32 choices
+# 
+# data <- list("ntrials","A.nchoices","A.nsubs","A.p","A.d",
+#              "B.nchoices","B.nsubs","B.p","B.d") #data inputted into jags
+# 
+# params <- c("A.mu_beta","A.mu_gamma",
+#             "B.mu_beta","B.mu_gamma",
+#             "mu_beta_log","mu_gamma_log","delta_beta","delta_gamma") #parameters we'll track in jags
+# 
+# 
+# set.seed(117)
+# controlsvsteens.ttest.samples <- jags(data, inits=NULL, params,
+#                                      model.file ="CCT_ttest.txt",
+#                                      n.chains=4, n.iter=5000, n.burnin=1000, n.thin=1)
+
+
+```
+
+```{r}
+## ---- Controls vs. crack --------###
+# test <- 1-cont.p
+# A.p <- 1-cont.p[1,,]  # first probability extracted, for all trials, for all participants - when omega defined at the trial level
+A.p <- 0.1
+A.d <- cont.d
+A.nchoices <- cont.nchoices
+A.nsubs <- cont.nsubs
+
+
+#B.p <- 1-crack.p[1,,]  # first probability extracted, for all trials, for all participants - when omega defined at the trial level
+B.p <- 0.1
+B.d <- crack.d
+B.nchoices <- crack.nchoices
+B.nsubs <- crack.nsubs
+
+data <- list("ntrials","A.nchoices","A.nsubs","A.p","A.d",
+             "B.nchoices","B.nsubs","B.p","B.d") #data inputted into jags
+
+params <- c("A.mu_beta","A.mu_gamma",
+            "B.mu_beta","B.mu_gamma",
+            "mu_beta_log","mu_gamma_log","delta_beta","delta_gamma")
+
+set.seed(117)
+controlsvscrack.ttest.samples <- jags(data, inits=NULL, params,
+                                     model.file ="constant_p.txt",
+                                     n.chains=4, n.iter=5000, n.burnin=1000, n.thin=1)
+
+
+```
+
+```{r}
+# ## ---------Teens vs. Crack---------###
+# A.p <- 1-teen.p[1,,] # # first probability extracted, for all trials, for all participants
+# A.d <- teen.d
+# A.nchoices <- teen.nchoices
+# A.nsubs <- teen.nsubs
+# 
+# #test med p på 0.1
+# B.p <- 1-crack.p[1,,] # first probability extracted, for all trials, for all participants
+# B.d <- crack.d
+# B.nchoices <- crack.nchoices
+# B.nsubs <- crack.nsubs
+# 
+# 
+# #B.nchoices[10,16] <- 31 # edge correction - can't make 32 choices
+# 
+# data <- list("ntrials","A.nchoices","A.nsubs","A.p","A.d",
+#              "B.nchoices","B.nsubs","B.p","B.d") #data inputted into jags
+# 
+# params <- c("A.mu_beta","A.mu_gamma",
+#             "B.mu_beta","B.mu_gamma",
+#             "mu_beta_log","mu_gamma_log","delta_beta","delta_gamma",
+#             "A.gamma", "B.gamma") #parameters we'll track in jags
+# 
+# 
+# set.seed(117)
+# teensvscrack.ttest.samples <- jags(data, inits=NULL, params,
+#                                   model.file ="CCT_ttest.txt",
+#                                   n.chains=4, n.iter=5000, n.burnin=1000, n.thin=1)
+# 
+# # When inits = NULL, jags creates initial parameter values by itself
+
+```
+
+
+```{r}
+##################################################################3
+###----------- Output of the t-tests ---------------####
+######################################################################
+
+# controlsvsteens.ttest.samples
+
+controlsvscrack.ttest.samples
+
+# teensvscrack.ttest.samples
+
+?dgamma
+
+```
+
+```{r}
+pacman::p_load(bayesplot, MCMCvis)
+# Plotting credible intervals
+
+# MCMCplot(controlsvsteens.ttest.samples,
+#          params = c("delta_gamma", "delta_beta"),
+#          labels = c(expression(paste(delta,gamma)), expression(paste(delta, beta))),
+#          ci = c(60, 95),
+#          ref_ovl = TRUE,
+#          col = c('red', 'blue'),
+#          rank = TRUE,
+#          main = " Controls vs. Adolescents",
+#          guide_axis = F,
+#          sz_ax = 1,
+#          xlab = "Estimate Value",
+#          sz_ax_txt = 1,
+#          sz_tick_txt = 1,
+#          sz_labels = 1.1,
+#          xlim = c(-3,3))
+
+
+MCMCplot(controlsvscrack.ttest.samples,
+         params = c("delta_gamma", "delta_beta"),
+         labels = c(expression(paste(delta,gamma)), expression(paste(delta, beta))),
+         ci = c(60, 95),
+         ref_ovl = TRUE,
+         col = c('red', 'blue'),
+         rank = TRUE,
+         main = "Credible intervals for group differences in parameters",
+         guide_axis = F,
+         sz_ax = 1,
+         xlab = "Estimate Value",
+         sz_ax_txt = 1,
+         sz_tick_txt = 1,
+         sz_labels = 1.1,
+         xlim = c(-3,3))
+
+# MCMCplot(teensvscrack.ttest.samples,
+#          params = c("delta_gamma", "delta_beta"),
+#          labels = c(expression(paste(delta,gamma)), expression(paste(delta, beta))),
+#          ref_ovl = TRUE,
+#          ci = c(60, 95),
+#          col = c('red', 'blue'),
+#          rank = TRUE,
+#          main = "Adolescents vs. Crack Users",
+#          guide_axis = F,
+#          sz_ax = 1,
+#          xlab = "Estimate Value",
+#          sz_ax_txt = 1,
+#          sz_tick_txt = 1,
+#          sz_labels = 1.1,
+#          xlim = c(-3,3))
+
+
+?MCMCplot
+# Points represent posterior medians
+
+
+# Interpretation - Controls vs Adolescents
+#Delta beta and delta: open circle and light colour indicates that even the smallest confidence interval overlap 0. This is the case for both delta-beta and delta-gamma. No difference between groups. credible intervals shows the intervals in which there is 95% probability that the parameter in question will lie. 
+
+# Interpretation - Controls vs. Crack Users
+#delta beta:  open circle and light colour indicates that even the smallest confidence interval overlap 0.
+
+# delta gamma: closed circle and dark colours, none of the credible intervals include 0. There is 95% probability that the difference in risk propensity between controls and crack users is going to fall within the shown interval - an interval that does not include 0. There is a difference betweem controls and crack users for risk propensity
+
+
+# Adolescents vs crack users
+# delta beta: open circle and light colour indicates that even the smallest confidence interval overlap 0.
+# delta gamma: closed circle and a lighter colour indicates that the smalles confidence interval does not include zero. Thus, there is a 50% probability that the difference in risk propensity between teens and crack users is going to be non-zero.   
+
+```
+
+
+
+```{r}
+# Density and convergence plots 
+
+
+# ###### Controls vs teens 
+# # delta - both under
+# MCMCtrace(controlsvsteens.ttest.samples,
+#           params = c("delta_gamma", "delta_beta"),
+#           ISB = FALSE,
+#           exact = TRUE,
+#           Rhat = TRUE,
+#           pdf = FALSE,
+#           main_den = "Controls vs. Teens") 
+# ?MCMCtrace
+# #beta, both under
+# MCMCtrace(controlsvsteens.ttest.samples,
+#           params = c("A.mu_beta", "B.mu_beta"),
+#           ISB = FALSE,
+#           exact = TRUE,
+#           Rhat = TRUE,
+#           pdf = FALSE)
+# 
+# #gamma 
+# # b.mu gamma rhat >1.01
+# MCMCtrace(controlsvsteens.ttest.samples,
+#           params = c("A.mu_gamma", "B.mu_gamma"),
+#           ISB = FALSE,
+#           exact = TRUE,
+#           Rhat = TRUE,
+#           pdf = FALSE)
+
+
+####### Controls and crack Users ##### 
+# delta - delta.gamma>1.08
+MCMCtrace(controlsvscrack.ttest.samples, 
+          params = c("delta_gamma", "delta_beta"),
+          ISB = FALSE,
+          exact = TRUE,
+          Rhat = TRUE,
+          pdf = FALSE)
+
+#beta, both rhat >1.01
+MCMCtrace(controlsvscrack.ttest.samples,
+          params = c("A.mu_beta", "B.mu_beta"),
+          ISB = FALSE,
+          exact = TRUE,
+          Rhat = TRUE,
+          pdf = FALSE)
+
+#gamma - both rhat>1.01
+MCMCtrace(controlsvscrack.ttest.samples,
+          params = c("A.mu_gamma", "B.mu_gamma"),
+          ISB = FALSE,
+          exact = TRUE,
+          Rhat = TRUE,
+          pdf = FALSE)
+
+
+
+
+
+# ####### Teens vs crack users 
+# # delta - rhat both > 1.01
+# MCMCtrace(teensvscrack.ttest.samples,
+#           params = c("delta_gamma", "delta_beta"),
+#           ISB = FALSE,
+#           exact = TRUE,
+#           Rhat = TRUE,
+#           pdf = FALSE)
+# 
+# #beta, 
+# # rhat A.mu.beta>1.02
+# MCMCtrace(teensvscrack.ttest.samples,
+#           params = c("A.mu_beta", "B.mu_beta"),
+#           ISB = FALSE,
+#           exact = TRUE,
+#           Rhat = TRUE,
+#           pdf = FALSE)
+# 
+# #gamma - both Rhat> 1.01
+# MCMCtrace(teensvscrack.ttest.samples,
+#           params = c("A.mu_gamma", "B.mu_gamma"),
+#           ISB = FALSE,
+#           exact = TRUE,
+#           Rhat = TRUE,
+#           pdf = FALSE)
+
+
+
+# MCMC table
+# ?MCMCsummary
+# MCMCsummary(controlsvsteens.ttest.samples, round = 2,
+#             params = c("A.mu_gamma", "A.mu_beta", "B.mu_gamma", "B.mu_beta", "delta_gamma", "delta_beta"),
+#             n.eff = T, Rhat = TRUE)
+
+
+MCMCsummary(controlsvscrack.ttest.samples, round = 2,
+            params = c("A.mu_gamma", "A.mu_beta", "B.mu_gamma", "B.mu_beta", "delta_gamma", "delta_beta"),
+            n.eff = T, Rhat = T)
+
+f <- controlsvscrack.ttest.samples$BUGSoutput$mean
+# 
+# MCMCsummary(teensvscrack.ttest.samples, round = 2,
+#             params = c("A.mu_gamma", "A.mu_beta", "B.mu_gamma", "B.mu_beta", "delta_gamma", "delta_beta"),
+#             n.eff = T, Rhat = T)
+
+```
+
+```{r}
+##### Bayes Factor for delta These need to be updated!!
+pacman::p_load(logspline)
+
+prior <- dnorm(0,0,1) #prior for delta
+
+# 
+# ## Controls vs. teens
+# # delta gamma BF = 0.76
+# fit.posterior <- logspline(controlsvsteens.ttest.samples$BUGSoutput$sims.list$delta_gamma)
+# posterior <- dlogspline(0, fit.posterior) # this gives the pdf at point delta = 0 using a logspline fit
+# BF <- prior/posterior # the ratio of the prior to the posterior at the value for zero – how confident you are that there is an effect
+# 
+# 
+# # delta beta BF = 0.49
+# 
+# fit.posterior <- logspline(controlsvsteens.ttest.samples$BUGSoutput$sims.list$delta_beta)
+# posterior <- dlogspline(0, fit.posterior) # this gives the pdf at point delta = 0 using a logspline fit
+# BF <- prior/posterior # the ratio of the prior to the posterior at the value for zero – how confident you are that there is an effect
+
+
+## Controls vs. crack users
+# delta gamma BF = 0.49
+fit.posterior <- logspline(controlsvscrack.ttest.samples$BUGSoutput$sims.list$delta_gamma)
+posterior <- dlogspline(0, fit.posterior) # this gives the pdf at point delta = 0 using a logspline fit
+BF <- prior/posterior # the ratio of the prior to the posterior at the value for zero – how confident you are that there is an effect
+
+
+# Delta beta = 3.84
+fit.posterior <- logspline(controlsvscrack.ttest.samples$BUGSoutput$sims.list$delta_beta)
+posterior <- dlogspline(0, fit.posterior) # this gives the pdf at point delta = 0 using a logspline fit
+BF <- prior/posterior # the ratio of the prior to the posterior at the value for zero – how confident you are that there is an effect
+
+
+# ## Teens vs. Crack users
+# 
+# # delta gamma = 0.61
+# fit.posterior <- logspline(teensvscrack.ttest.samples$BUGSoutput$sims.list$delta_gamma)
+# posterior <- dlogspline(0, fit.posterior) # this gives the pdf at point delta = 0 using a logspline fit
+# BF <- prior/posterior # the ratio of the prior to the posterior at the value for zero – how confident you are that there is an effect
+# 
+# # Delta beta = 0.58
+# fit.posterior <- logspline(teensvscrack.ttest.samples$BUGSoutput$sims.list$delta_beta)
+# posterior <- dlogspline(0, fit.posterior) # this gives the pdf at point delta = 0 using a logspline fit
+# BF <- prior/posterior # the ratio of the prior to the posterior at the value for zero – how confident you are that there is an effect
+
+```
+
