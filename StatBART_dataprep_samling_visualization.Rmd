@@ -1,0 +1,227 @@
+---
+title: "StatBART Data cleaning, sampling and visuals"
+author: "Nikolaj Munch"
+date: '2023-01-12'
+output: html_document
+---
+
+## R Markdown with the steps of preparing data, sampling with group-level model and visualizing outputs
+
+#Preparing data
+
+```{r}
+library(pacman)
+pacman::p_load(tidyverse)
+
+df <- read.csv('DMexamdata.csv')
+
+#Start by removing adolescents from dataframe
+
+df <- df %>% filter(Study_Group != "Health Adolescents")
+
+#Create condition column called z, where 1 = health adults and 2= crack users
+
+df$z <- ifelse(df$Study_Group == "Health Adults", 1, ifelse(df$Study_Group == "Crack Users", 2, NA))
+
+df$y <- rowSums(df[,18:49])
+
+# Initialize an empty vector to store the values of burst
+burst <- vector()
+
+# Loop through each row of the data frame
+for (i in 1:nrow(df)) {
+  # Check if the condition df$CCT_NumCardChosen == df$CCT_Censored is met
+  if (df$CCT_NumCardChosen[i] == df$CCT_Censored[i]) {
+    # If the condition is met, set burst[i] to the value of y for that row
+    burst[i] <- df$y[i]
+  } else {
+    # If the condition is not met, set burst[i] to a random value between y+1 and 32
+    burst[i] <- sample((df$y[i]+1):32, 1, replace = FALSE)
+    
+    #ALTERNATIVELY DEPENDING ON PROB STRUCTURE USED FOR POSTERIOR PREDICTIVE CHECKS
+    #Set all to 32
+    #burst[i] <- 32
+  }
+}
+
+# Add the burst vector as a new column to the data frame
+df$burst <- burst
+
+df$participant <- df$ID
+
+
+DifferenceData <- df %>% select(y, burst, participant, z)
+
+DifferenceData$participant<- match(df$participant, unique(df$participant))
+DifferenceData[DifferenceData == 0] <- 1
+
+```
+
+
+```{r}
+
+# Prepare data to pass to JAGS --------------------------------------------
+
+# Set the needed values
+nParticipants = max(DifferenceData$participant) # number of participants in the experiment
+maxPumps <- max(DifferenceData$burst)+ 2 # just needs to be higher than the number of pumps and participant did
+totalTrials <- length(DifferenceData$participant) # total number of trials across all participants
+
+# Specify data as vectors
+burst <- DifferenceData$burst # vector of burst points on every trial
+y <- DifferenceData$y # vector of participant behavior (how many times they pumped on a given trial)
+participant <- DifferenceData$participant # vector of Participant ID's, indicating who is doing a given trial
+z <- DifferenceData$z[1:nParticipants] 
+
+data <- list("nParticipants","totalTrials","maxPumps","burst","y","participant","z") # to be passed on to JAGS
+
+# Run model in JAGS -------------------------------------------------------
+
+# parameters to be monitored:	
+parameters <- c("rho", "beta", "deltaRho", "deltaBeta", "deltaPriorBeta", "deltaPriorRho", "yPrime", "muRho[1]", "muRho[2]", "muBeta[1]", "muBeta[2]")
+
+
+inits.jagsParallel=function(nParticipants){
+  return(list(list("yPrime" = y)))
+}
+
+#Now use jags.parallel to run multiple chains much quicker, adjust chains in n.chains
+
+samples =jags.parallel(data,inits=inits.jagsParallel(nParticipants), parameters.to.save = parameters,
+                       model.file="GroupDifferenceBothParams_statBART.txt",n.chains=4,n.burnin = 1000, n.iter=10000, n.thin=1)
+
+
+
+# Extract the prior and posterior distributions of delta
+
+
+# the delta parameter represents the difference in means between the two groups for the rho variable. Specifically, delta is defined as mu[2] - mu[1], where mu[1] is the mean of the rho distribution for group 1 and mu[2] is the mean of the rho distribution for group 2. Therefore, a positive value of delta indicates that group 2 has a higher mean for rho compared to group 1, while a negative value indicates that group 1 has a higher mean.
+
+library(stats)
+library(ggplot2)
+
+
+prior_deltaRho <- samples$BUGSoutput$sims.list$deltaPriorRho
+prior_deltaBeta <- samples$BUGSoutput$sims.list$deltaPriorBeta
+
+posterior_deltaRho <- samples$BUGSoutput$sims.list$deltaRho
+posterior_deltaBeta <- samples$BUGSoutput$sims.list$deltaBeta
+
+# Bind the prior and posterior distributions into a single data frame for each param
+df_delta_rho <- data.frame(value = c(prior_deltaRho, posterior_deltaRho),
+                 distribution = c(rep("Prior", length(prior_deltaRho)),
+                                 rep("Posterior", length(posterior_deltaRho))))
+
+
+df_delta_beta <- data.frame(value = c(prior_deltaBeta, posterior_deltaBeta),
+                 distribution = c(rep("Prior", length(prior_deltaBeta)),
+                                 rep("Posterior", length(posterior_deltaBeta))))
+
+# Create the plot using ggplot2
+p_deltaRho <- ggplot(df_delta_rho, aes(x = value)) +
+  geom_density(aes(fill = distribution), alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Prior and Posterior Distributions of Delta for Rho",
+       x = "Delta", y = "Density")
+
+p_deltaBeta <- ggplot(df_delta_beta, aes(x = value)) +
+  geom_density(aes(fill = distribution), alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Prior and Posterior Distributions of Delta for Beta",
+       x = "Delta", y = "Density")
+
+
+#Mean of groups
+mean(posterior_deltaRho)
+mean(posterior_deltaBeta)
+
+library(coda)
+
+Rho_cred_intervals <- quantile(posterior_deltaRho, c(0.025, 0.975))
+Beta_cred_intervals <- quantile(posterior_deltaBeta, c(0.025, 0.975))
+
+Rho_lower = Rho_cred_intervals[1]
+Rho_upper = Rho_cred_intervals[2]
+Beta_lower = Beta_cred_intervals[1]
+Beta_upper = Beta_cred_intervals[2]
+
+print(Beta_lower)
+print(Beta_upper)
+
+
+summary <- samples$BUGSoutput$summary
+
+# Savage-Dickey test on r -------------------------------------------------
+
+delta_prior = dnorm(0,0,10) # find the prior at 0
+
+delta_post = dlogspline(0,logspline(posterior_deltaBeta)) # change here to get BF for another delta
+
+BF = delta_post/delta_prior
+
+if(BF >= 1){
+  BF_01 = BF
+}  else{BF_10 = 1/BF}
+
+hist(posterior_deltaRho)
+
+
+
+#VISUALIZING EFFECTS and chains
+
+####### Controls and crack Users ##### 
+# delta - delta.gamma>1.08
+deltap <- MCMCtrace(samples, 
+          params = c("deltaRho", "deltaBeta"),
+          ISB = FALSE,
+          exact = TRUE,
+          Rhat = TRUE,
+          pdf = FALSE)
+
+
+
+
+
+
+
+
+```
+
+
+#Visualizing estimated parameters for all participants in a scatter plot
+
+
+```{r}
+
+# Create an empty data frame to store the estimated values of rho and beta for each participant
+df_params_forallparts <- data.frame()
+
+# Loop over each participant
+for (i in 1:nParticipants) {
+  # Extract the mean values of rho and beta for the current participant
+  rho_mean <- samples$BUGSoutput$mean$rho[i]
+  beta_mean <- samples$BUGSoutput$mean$beta[i]
+  
+  # Extract the group identifier for the current participant
+  group <- DifferenceData[DifferenceData$participant == i, "z"]
+  
+  # Bind the estimated values of rho and beta, along with the participant identifier and group identifier, into the data frame
+  df_params_forallparts <- rbind(df_params_forallparts, data.frame(rho = rho_mean, beta = beta_mean, participant = i, Group = group))
+}
+
+
+df_params_forallparts <- subset(df_params_forallparts, !duplicated(df_params_forallparts))
+df_params_forallparts$Group <- as.factor(df_params_forallparts$Group)
+
+p2 <- ggplot(df_params_forallparts, aes(x = rho, y = beta, color = Group)) +
+  geom_point() +
+  xlab("Risk Propensity") +
+  ylab("Behavioural Consistency") +
+  scale_color_manual(values = c("#56B4E9", "#D55E00"), labels = c("Crack Users", "Healthy Adults"))
+
+p2
+```
+
+
+
+

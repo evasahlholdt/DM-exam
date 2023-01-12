@@ -1,0 +1,387 @@
+---
+title: "Decision making exam - Parameter estimation and posterior predictive checks"
+author: "Nikolaj Munch"
+date: '2023-01-12'
+output: html_document
+---
+
+## This is an R Markdown showing the steps we took for parameter recovery and posterior predictive checks
+
+```{r}
+library(pacman)
+pacman::p_load(tidyverse, rtruncnorm, R2jags)
+```
+
+
+# Parameter recovery for statistical BART
+```{r}
+
+#Creating a function that generates a dataframe of participant hot-CCT behavior for a given rho and beta value. This function is also used later when predicting data for the posterior predictive check
+
+generateDataForParticipant <- function(rho, beta, nTrials) {
+  library(truncnorm)
+  simulated_data <- data.frame(y = numeric(), burst = numeric(), participant = numeric()) # Initialize DF to store data in
+  for (t in 1:nTrials) { # Loop nTrials times to generate data for the specified number of trials
+    yPrime <- rtruncnorm(1, a=0, mean = rho, sd = beta) # truncnorms ensures these values can't be negative (can't predict negative pumps)
+    burst <- sample(1:32, size = 1, replace = TRUE)
+    y <- round(yPrime)
+    y <- max(y, 1) #Y must be 1 or more
+    y <- pmin(y, burst) # Set y to burst if y is greater than burst
+    simulated_data <- rbind(simulated_data, data.frame(y = y, burst = burst, participant = 1)) # Add data for this trial to the simulated_data data frame
+  }
+  return(simulated_data)
+  }
+  
+
+#Now for parameter recovery, first we set number of participants and trials
+nRuns = 100
+nTrials = 24
+#Then we sample (nParticipants) amount of true rho and beta values. Truncated at 0
+true_rho <- rtruncnorm(nRuns, a= 0, mean = 7, sd = 6)
+true_beta <- rtruncnorm(nRuns, a= 0, mean = 3 , sd = 3)
+
+
+# Initialize empty data frame
+param_recovery <- data.frame(true_rho = numeric(), estimated_rho = numeric(), true_beta = numeric(), estimated_beta=numeric(), participant = numeric())
+
+#Initializing loop for running models with the true values for rho and beta
+# Run parameter recovery analysis for each participant
+for (i in 1:nRuns) {
+  # Generate demo data for this participant
+  participant_i_dataframe <- generateDataForParticipant(true_rho[i], true_beta[i], nTrials)
+  
+  ############################ Prepare the data for jags 
+  nParticipants = 1 # number of participants in the experiment
+  maxPumps <- max(participant_i_dataframe$burst)+ 2 # just needs to be higher than the number of pumps a participant did
+  totalTrials <- nTrials # total number of trials across all participants
+  
+ 
+  burst <- participant_i_dataframe$burst # vector of burst points on every trial
+  y <- participant_i_dataframe$y # vector of participant behavior (how many times they pumped on a given trial)
+  participant <- participant_i_dataframe$participant # vector of Participant ID's, indicating who is doing a given trial
+  participant_i_jagsdata <- list("nParticipants","totalTrials","maxPumps","burst","y","participant")
+  #############################
+  
+  
+  myinits <- list(list("yPrime" = y,"beta" = runif(nParticipants,.5,1)))  
+  parameters <- c("beta", "rho","yPrime")
+  # Run JAGS model on demo data
+  samples <- jags.parallel(participant_i_jagsdata, inits=myinits,parameters.to.save = parameters,
+                  model.file="statBART_paramrecov.txt", n.chains=4,n.burnin = 1000, n.iter=10000, n.thin=1, DIC=T)
+  
+  # Extract estimated parameter values from JAGS output
+  # Extract the posterior samples for rho and beta
+  rho_sample <- samples$BUGSoutput$sims.list$rho
+  beta_sample <- samples$BUGSoutput$sims.list$beta
+  
+  # Calculate summary statistics for the posterior samples
+  estimated_rho <- median(rho_sample)
+  estimated_beta <- median(beta_sample)
+  
+  # Add true and estimated parameter values to data frame
+  param_recovery <- rbind(param_recovery, data.frame(true_rho = true_rho[i], estimated_rho = estimated_rho, true_beta = true_beta[i], estimated_beta = estimated_beta, participant = i))
+}
+
+
+View(param_recovery)
+
+
+write.csv(param_recovery, 'param_recovery_100participants_statBART.csv')
+
+#Plotting param recovery for rho
+
+
+# Set the limits for the x and y axes
+x_limits <- c(0, 20)
+y_limits <- c(0, 20)
+
+rho_recov_p_stat <- ggplot(param_recovery, aes(x = true_rho, y = estimated_rho)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1) +
+  scale_x_continuous(limits = x_limits) +
+  scale_y_continuous(limits = y_limits)
+
+
+x_limits <- c(0, 10)
+y_limits <- c(0, 10)
+
+#Plotting param recovery for beta
+beta_recov_p_stat <- ggplot(param_recovery, aes(x = true_beta, y = estimated_beta)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1) +
+  scale_x_continuous(limits = x_limits) +
+  scale_y_continuous(limits = y_limits)
+
+
+
+```
+
+
+#Parameter recovery for cognitive BART
+
+```{r}
+
+# Creating function that generates data based on known values of gamma (risk propensity) and beta (behavioral consistency). This is also going to be used later for posterior predictives 
+
+generate_fake_data <- function(beta, gamma, ntrials) {
+  p <- 0.1
+  # Initialize empty arrays for d and theta
+  d <- array(0, dim = c(ntrials, 32))
+  theta <- array(0, dim = c(ntrials, 32))
+  
+  # Initialize empty array for n_flips
+  n_flips <- integer(ntrials)
+  
+  # Generate data for each trial
+  for (t in 1:ntrials) {
+    # Initialize flip counter for this trial
+    n_flips[t] <- 0
+    
+    #Set max flips for this trial i.e generate a random burst point
+    max_flips <- sample(1:32, size = 1, replace = TRUE)
+    
+    # Generate data for each flip
+    for (k in 1:max_flips) {
+      # Calculate omega for this flip based on gamma and p
+      omega <- -gamma/(log(1-p))
+      
+      # Calculate theta for this flip
+      theta[t,k] <- (1/(1 + (exp(beta*(k-omega)))))
+      
+      # Set d[t,k] to 1 for the first flip
+      if (k == 1) {
+        d[t,k] <- 1
+      } else {
+        # Generate a Bernoulli sample for this flip
+        d[t,k] <- rbinom(1, size = 1, prob = theta[t,k])
+      }
+      
+      # Increment flip counter if d[t,k] is 1
+      if (d[t,k] == 1) {
+        n_flips[t] <- n_flips[t] + 1
+      }
+      
+      # Check if d[t,k] is 0
+      if (d[t,k] == 0) {
+        # Set theta for all remaining flips to 0
+        #theta[t,(k+1):32] <- 0
+        
+        # Set d for all remaining flips to 0
+        d[t, k:32] <- 0
+        
+        # Break loop
+        break
+      }
+    }
+  }
+  
+  # Return the generated data
+  return(list(n_flips = n_flips, d = d, ntrials = ntrials))
+}
+
+
+
+#Setting values for trials and distributions of true gamma and beta to sample from
+library(truncnorm)
+
+nRuns = 100 #How many participants do we want to simulate
+nTrials = 24 #How many trial does each participant do
+
+true_gamma <- rtruncnorm(nRuns, a= 0, mean = 0, sd = 3) #Need to experiment with these
+true_beta <- rtruncnorm(nRuns, a= 0, mean = 0 , sd = 0.5)
+
+#Initialize dataframe to save values
+
+param_recovery <- data.frame(true_gamma = numeric(), estimated_gamma = numeric(), true_beta = numeric(), estimated_beta=numeric(), participant = numeric())
+
+
+#Initializing loop for running models with the true values for gamma and beta
+# Run parameter recovery analysis for each participant
+for (i in 1:nRuns) {
+  # Generate demo data for this participant
+  participant_i_dataframe <- generate_fake_data(true_beta[i], true_gamma[i], nTrials)
+  
+  parameters <- c("beta", "gamma")
+  # Run JAGS model on demo data
+  samples_i <- jags.parallel(participant_i_dataframe, parameters = parameters,
+                model.file="BART_recov_test.txt", n.chains=4,n.burnin = 1000, n.iter=10000, n.thin=1, DIC=T)
+  
+  # Extract estimated parameter values from JAGS output
+  # Extract the posterior samples for rho and beta
+  gamma_sample <- samples_i$BUGSoutput$sims.list$gamma
+  beta_sample <- samples_i$BUGSoutput$sims.list$beta
+  
+  # Calculate summary statistics for the posterior samples
+  estimated_gamma <- mean(gamma_sample) #Maybe find another method to extract these values, what does Andreas use? 
+  estimated_beta <- mean(beta_sample) 
+  
+  # Add true and estimated parameter values to data frame
+  param_recovery <- rbind(param_recovery, data.frame(true_gamma = true_gamma[i], estimated_gamma = estimated_gamma, true_beta = true_beta[i], estimated_beta = estimated_beta, participant = i))
+}
+
+
+# Set the limits for the x and y axes
+x_limits <- c(0, 20)
+y_limits <- c(0, 20)
+
+gamma_recov_p_cog <- ggplot(param_recovery, aes(x = true_gamma, y = estimated_gamma)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1) +
+  scale_x_continuous(limits = x_limits) +
+  scale_y_continuous(limits = y_limits)
+
+
+x_limits <- c(0, 10)
+y_limits <- c(0, 10)
+
+#Plotting param recovery for beta
+beta_recov_p_cog <- ggplot(param_recovery, aes(x = true_beta, y = estimated_beta)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1) +
+  scale_x_continuous(limits = x_limits) +
+  scale_y_continuous(limits = y_limits)
+
+
+```
+
+# Posterior predictive checks for statistical BART model
+
+```{r}
+
+#POSTERIOR PREDICTIVE CHECKS FOR STAT BART BASED ON NUMBER OF PUMPS FOR EACH TRIAL
+
+#Get distribution of n pumps for all participants
+
+df_true_pumpdists <- data.frame()
+nParticipants = 47
+
+for (i in 1:nParticipants) {
+  pumpdf_i <- DifferenceData %>% filter(participant == i)
+  df_true_pumpdists <- rbind(df_true_pumpdists, data.frame(y = pumpdf_i$y,participant = i, PredvsTrue = "True"))
+}
+
+
+#PREDICTED PUMPS FOR CBART
+df_est_pumpdists <- data.frame()
+for (i in 1:nParticipants) {
+  true_beta <- samples$BUGSoutput$mean$beta[i]
+  true_rho <- samples$BUGSoutput$mean$rho[i]
+  predicted_data <- generateDataForParticipant(true_rho, true_beta, 24)
+  df_est_pumpdists <- rbind(df_est_pumpdists, data.frame(y = predicted_data$y, participant = i, PredvsTrue = "Pred"))
+}
+
+
+#Collect in one DF
+distdf_all <- rbind(df_true_pumpdists, df_est_pumpdists)
+
+
+# grouped boxplot
+ggplot(distdf_all, aes(x=participant, y=y, fill=PredvsTrue)) + 
+    geom_boxplot()
+
+
+
+#visualizations with grouped boxplots <- visualizes the predicted and the actual distribution of flips for every participant
+
+distdf_filtered_23 <- distdf_all %>% filter(participant < 24)
+distdf_filtered_24 <- distdf_all %>% filter(participant > 23)
+
+distdf_filtered_23$participant <- as.factor(distdf_filtered_23$participant)
+distdf_filtered_23$PredvsTrue <- as.factor(distdf_filtered_23$PredvsTrue)
+
+distdf_filtered_24$participant <- as.factor(distdf_filtered_24$participant)
+distdf_filtered_24$PredvsTrue <- as.factor(distdf_filtered_24$PredvsTrue)
+
+#Change DF here for both visualizations
+ggplot(distdf_filtered_24, aes(x=participant, y=y, fill=PredvsTrue)) + xlab("Participant") +
+  ylab("Distribution of card flips across 24 trials") +
+    geom_boxplot(outlier.shape=NA) + stat_summary(fun.y=mean, geom="point", shape=23, size=2)
+
+
+```
+
+
+#Posterior predictive checks for cognitive BART model 
+
+```{r}
+
+#Posterior predictive check for COG-BART
+nParticipants_crack <- 27
+nParticipants_control <- 20
+
+DifferenceDataControl <- DifferenceData %>% filter(z == 1)
+
+DifferenceDataControl$participant<- dense_rank(DifferenceDataControl$participant)
+
+DifferenceDataCrack <- DifferenceData %>% filter(z == 2)
+
+DifferenceDataCrack$participant<- dense_rank(DifferenceDataCrack$participant)
+
+#FIRST LOOP CHECKS THE PREDICTIVE STRENGTH FOR THE CONTROL GROUP - FIRST WE CREATE A DF FOR THE TRUE CONTROL DATA AND NEXT A DF FOR THE PREDICTED
+
+df_true_pumpdists_controls <- data.frame()
+
+
+for (i in 1:nParticipants_control) {
+  pumpdf_i <- DifferenceDataControl %>% filter(participant == i)
+  df_true_pumpdists_controls <- rbind(df_true_pumpdists_controls, data.frame(y = pumpdf_i$y,participant = i, PredvsTrue = "True"))
+}
+
+#THEN WE CREATE THE PREDICTED DATA
+
+
+df_est_pumpdists_control <- data.frame()
+for (i in 1:nParticipantsControl) {
+  true_beta <- hvc_0.1_samples$BUGSoutput$mean$A.beta[i]
+  true_gamma <- hvc_0.1_samples$BUGSoutput$mean$A.gamma[i]
+  predicted_data <- generate_fake_data(true_beta, true_gamma, 24)
+  df_est_pumpdists_control <- rbind(df_est_pumpdists_control, data.frame(y = predicted_data$n_flips, participant = i, PredvsTrue = "Pred"))
+}
+
+#Collect in one DF
+og_distdf_all_control <- rbind(df_true_pumpdists_controls, df_est_pumpdists_control)
+
+
+og_distdf_all_control$participant <- as.factor(og_distdf_all_control$participant)
+og_distdf_all_control$PredvsTrue <- as.factor(og_distdf_all_control$PredvsTrue )  
+
+
+ggplot(og_distdf_all_control, aes(x=participant, y=y, fill=PredvsTrue)) + xlab("Healty adult participants") +
+  ylab("Distribution of card flips across 24 trials") +
+    geom_boxplot(outlier.shape=NA) + stat_summary(fun.y=mean, geom="point", shape=23, size=2) + scale_fill_brewer(palette="Pastel2")
+
+
+
+#NOW WE DO THE SAME FOR THE CRACK USERS
+
+df_true_pumpdists_crack <- data.frame()
+
+
+for (i in 1:nParticipants_crack) {
+  pumpdf_i <- DifferenceDataCrack %>% filter(participant == i)
+  df_true_pumpdists_crack <- rbind(df_true_pumpdists_crack, data.frame(y = pumpdf_i$y,participant = i, PredvsTrue = "True"))
+}
+
+#THEN WE CREATE THE PREDICTED DATA
+
+df_est_pumpdists_crack <- data.frame()
+for (i in 1:nParticipantsCrack) {
+  true_beta <- hvc_0.1_samples$BUGSoutput$mean$B.beta[i]
+  true_gamma <- hvc_0.1_samples$BUGSoutput$mean$B.gamma[i]
+  predicted_data <- generate_fake_data(true_beta, true_gamma, 24)
+  df_est_pumpdists_crack <- rbind(df_est_pumpdists_crack, data.frame(y = predicted_data$n_flips, participant = i, PredvsTrue = "Pred"))
+}
+
+#Collect in one DF
+og_distdf_all_crack <- rbind(df_true_pumpdists_crack, df_est_pumpdists_crack)
+
+
+og_distdf_all_crack$participant <- as.factor(og_distdf_all_crack$participant)
+og_distdf_all_crack$PredvsTrue <- as.factor(og_distdf_all_crack$PredvsTrue )  
+
+#Change df input here for the different visualizations
+ggplot(og_distdf_all_crack, aes(x=participant, y=y, fill=PredvsTrue)) + xlab("Crack user participants") +
+  ylab("Distribution of card flips across 24 trials") +
+    geom_boxplot(outlier.shape=NA) + stat_summary(fun.y=mean, geom="point", shape=23, size=2) + scale_fill_brewer(palette="Pastel2")
+```
+
